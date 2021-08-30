@@ -1,4 +1,3 @@
-from os import linesep, name
 import time
 
 import matplotlib.patches as patches
