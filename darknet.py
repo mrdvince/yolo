@@ -1,3 +1,8 @@
+import numpy as np
+import torch
+import torch.nn as nn
+
+
 class YoloLayer(nn.Module):
     def __init__(self, anchor_mask=None, num_classes=0, anchors=None, num_anchors=1):
         super(YoloLayer, self).__init__()
@@ -65,6 +70,110 @@ class EmptyModule(nn.Module):
 
     def forward(self, x):
         return x
+
+
+class Darknet(nn.Module):
+    def __init__(self, cfgfile):
+        super(Darknet, self).__init__()
+        self.blocks = parse_config(cfgfile)
+        self.models = self.create_network(self.blocks)  # merge conv, bn,leaky
+        self.loss = self.models[len(self.models) - 1]
+        self.width = int(self.blocks[0]["width"])
+        self.height = int(self.blocks[0]["height"])
+        self.header = torch.IntTensor([0, 0, 0, 0])
+        self.seen = 0
+
+    def create_network(self, blocks):
+        models = nn.ModuleList()
+
+        prev_filters = 3
+        out_filters = []
+        prev_stride = 1
+        out_strides = []
+        conv_id = 0
+        for block in blocks:
+            if block["type"] == "net":
+                prev_filters = int(block["channels"])
+                continue
+            elif block["type"] == "convolutional":
+                conv_id = conv_id + 1
+                batch_normalize = int(block["batch_normalize"])
+                filters = int(block["filters"])
+                kernel_size = int(block["size"])
+                stride = int(block["stride"])
+                is_pad = int(block["pad"])
+                pad = (kernel_size - 1) // 2 if is_pad else 0
+                activation = block["activation"]
+                model = nn.Sequential()
+                if batch_normalize:
+                    model.add_module(
+                        "conv{0}".format(conv_id),
+                        nn.Conv2d(
+                            prev_filters, filters, kernel_size, stride, pad, bias=False
+                        ),
+                    )
+                    model.add_module("bn{0}".format(conv_id), nn.BatchNorm2d(filters))
+                else:
+                    model.add_module(
+                        "conv{0}".format(conv_id),
+                        nn.Conv2d(prev_filters, filters, kernel_size, stride, pad),
+                    )
+                if activation == "leaky":
+                    model.add_module(
+                        "leaky{0}".format(conv_id), nn.LeakyReLU(0.1, inplace=True)
+                    )
+                prev_filters = filters
+                out_filters.append(prev_filters)
+                prev_stride = stride * prev_stride
+                out_strides.append(prev_stride)
+                models.append(model)
+            elif block["type"] == "upsample":
+                stride = int(block["stride"])
+                out_filters.append(prev_filters)
+                prev_stride = prev_stride // stride
+                out_strides.append(prev_stride)
+                models.append(Upsample(stride))
+            elif block["type"] == "route":
+                layers = block["layers"].split(",")
+                ind = len(models)
+                layers = [int(i) if int(i) > 0 else int(i) + ind for i in layers]
+                if len(layers) == 1:
+                    prev_filters = out_filters[layers[0]]
+                    prev_stride = out_strides[layers[0]]
+                elif len(layers) == 2:
+                    assert layers[0] == ind - 1
+                    prev_filters = out_filters[layers[0]] + out_filters[layers[1]]
+                    prev_stride = out_strides[layers[0]]
+                out_filters.append(prev_filters)
+                out_strides.append(prev_stride)
+                models.append(EmptyModule())
+            elif block["type"] == "shortcut":
+                ind = len(models)
+                prev_filters = out_filters[ind - 1]
+                out_filters.append(prev_filters)
+                prev_stride = out_strides[ind - 1]
+                out_strides.append(prev_stride)
+                models.append(EmptyModule())
+            elif block["type"] == "yolo":
+                yolo_layer = YoloLayer()
+                anchors = block["anchors"].split(",")
+                anchor_mask = block["mask"].split(",")
+                yolo_layer.anchor_mask = [int(i) for i in anchor_mask]
+                yolo_layer.anchors = [float(i) for i in anchors]
+                yolo_layer.num_classes = int(block["classes"])
+                yolo_layer.num_anchors = int(block["num"])
+                yolo_layer.anchor_step = (
+                    len(yolo_layer.anchors) // yolo_layer.num_anchors
+                )
+                yolo_layer.stride = prev_stride
+                out_filters.append(prev_filters)
+                out_strides.append(prev_stride)
+                models.append(yolo_layer)
+            else:
+                print("unknown type %s" % (block["type"]))
+
+        return models
+
 
 def parse_config(cfgfile):
     blocks = []
