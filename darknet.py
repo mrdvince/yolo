@@ -6,6 +6,10 @@ import torch.nn as nn
 class YoloLayer(nn.Module):
     def __init__(self, anchor_mask=None, num_classes=0, anchors=None, num_anchors=1):
         super(YoloLayer, self).__init__()
+        if anchor_mask is None:
+            anchor_mask = []
+        if anchors is None:
+            anchors = []
         self.anchor_mask = anchor_mask
         self.num_classes = num_classes
         self.anchors = anchors
@@ -309,7 +313,6 @@ def get_region_boxes(
         output = output.unsqueeze(0)
     batch = output.size(0)
     assert output.size(1) == (5 + num_classes) * num_anchors
-    print("########", output.shape)
     h = output.size(2)
     w = output.size(3)
     all_boxes = []
