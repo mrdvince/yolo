@@ -52,8 +52,6 @@ class Upsample(nn.Module):
         C = x.data.size(1)
         H = x.data.size(2)
         W = x.data.size(3)
-        ws = stride
-        hs = stride
         x = (
             x.view(B, C, H, 1, W, 1)
             .expand(B, C, H, stride, W, stride)
@@ -82,6 +80,88 @@ class Darknet(nn.Module):
         self.height = int(self.blocks[0]["height"])
         self.header = torch.IntTensor([0, 0, 0, 0])
         self.seen = 0
+
+    def forward(self, x, nms_thresh):
+        ind = -2
+        self.loss = None
+        outputs = dict()
+        out_boxes = []
+        for block in self.blocks:
+            ind = ind + 1
+            if block["type"] == "net":
+                continue
+            elif block["type"] in ["convolutional", "upsample"]:
+                x = self.models[ind](x)
+                outputs[ind] = x
+            elif block["type"] == "route":
+                layers = block["layers"].split(",")
+                layers = [int(i) if int(i) > 0 else int(i) + ind for i in layers]
+                if len(layers) == 1:
+                    x = outputs[layers[0]]
+                    outputs[ind] = x
+                elif len(layers) == 2:
+                    x1 = outputs[layers[0]]
+                    x2 = outputs[layers[1]]
+                    x = torch.cat((x1, x2), 1)
+                    outputs[ind] = x
+            elif block["type"] == "shortcut":
+                from_layer = int(block["from"])
+                from_layer = from_layer if from_layer > 0 else from_layer + ind
+                x1 = outputs[from_layer]
+                x2 = outputs[ind - 1]
+                x = x1 + x2
+                outputs[ind] = x
+            elif block["type"] == "yolo":
+                boxes = self.models[ind](x, nms_thresh)
+                out_boxes.append(boxes)
+            else:
+                print("unknown type %s" % (block["type"]))
+
+        return out_boxes
+
+    def print_network(self):
+        print_cfg(self.blocks)
+
+    def load_weights(self, weightfile):
+        print()
+        fp = open(weightfile, "rb")
+        header = np.fromfile(fp, count=5, dtype=np.int32)
+        self.header = torch.from_numpy(header)
+        self.seen = self.header[3]
+        buf = np.fromfile(fp, dtype=np.float32)
+        fp.close()
+
+        start = 0
+        ind = -2
+        counter = 3
+        for block in self.blocks:
+            if start >= buf.size:
+                break
+            ind = ind + 1
+            if block["type"] == "net":
+                continue
+            elif block["type"] == "convolutional":
+                model = self.models[ind]
+                batch_normalize = int(block["batch_normalize"])
+                if batch_normalize:
+                    start = load_conv_bn(buf, start, model[0], model[1])
+                else:
+                    start = load_conv(buf, start, model[0])
+            elif block["type"] in ["upsample", "route", "shortcut", "shortcut", "yolo"]:
+                # pass given block types when loading weights
+                pass
+            else:
+                print("unknown type %s" % (block["type"]))
+
+            percent_comp = (counter / len(self.blocks)) * 100
+
+            print(
+                "Loading weights. Please Wait...{:.2f}% Complete".format(percent_comp),
+                end="\r",
+                flush=True,
+            )
+
+            counter += 1
 
     def create_network(self, blocks):
         models = nn.ModuleList()
@@ -332,3 +412,141 @@ def get_region_boxes(
                         # fmt: on
         all_boxes.append(boxes)
     return all_boxes
+
+
+def print_cfg(blocks):
+    print("layer     filters    size              input                output")
+    prev_width = 416
+    prev_height = 416
+    prev_filters = 3
+    out_filters = []
+    out_widths = []
+    out_heights = []
+    ind = -2
+    for block in blocks:
+        ind = ind + 1
+        if block["type"] == "net":
+            prev_width = int(block["width"])
+            prev_height = int(block["height"])
+            continue
+        elif block["type"] == "convolutional":
+            filters = int(block["filters"])
+            kernel_size = int(block["size"])
+            stride = int(block["stride"])
+            is_pad = int(block["pad"])
+            pad = (kernel_size - 1) // 2 if is_pad else 0
+            width = (prev_width + 2 * pad - kernel_size) // stride + 1
+            height = (prev_height + 2 * pad - kernel_size) // stride + 1
+            print(
+                "%5d %-6s %4d  %d x %d / %d   %3d x %3d x%4d   ->   %3d x %3d x%4d"
+                % (
+                    ind,
+                    "conv",
+                    filters,
+                    kernel_size,
+                    kernel_size,
+                    stride,
+                    prev_width,
+                    prev_height,
+                    prev_filters,
+                    width,
+                    height,
+                    filters,
+                )
+            )
+            prev_width = width
+            prev_height = height
+            prev_filters = filters
+            out_widths.append(prev_width)
+            out_heights.append(prev_height)
+            out_filters.append(prev_filters)
+        elif block["type"] == "upsample":
+            stride = int(block["stride"])
+            filters = prev_filters
+            width = prev_width * stride
+            height = prev_height * stride
+            print(
+                "%5d %-6s           * %d   %3d x %3d x%4d   ->   %3d x %3d x%4d"
+                % (
+                    ind,
+                    "upsample",
+                    stride,
+                    prev_width,
+                    prev_height,
+                    prev_filters,
+                    width,
+                    height,
+                    filters,
+                )
+            )
+            prev_width = width
+            prev_height = height
+            prev_filters = filters
+            out_widths.append(prev_width)
+            out_heights.append(prev_height)
+            out_filters.append(prev_filters)
+        elif block["type"] == "route":
+            layers = block["layers"].split(",")
+            layers = [int(i) if int(i) > 0 else int(i) + ind for i in layers]
+            if len(layers) == 1:
+                print("%5d %-6s %d" % (ind, "route", layers[0]))
+                prev_width = out_widths[layers[0]]
+                prev_height = out_heights[layers[0]]
+                prev_filters = out_filters[layers[0]]
+            elif len(layers) == 2:
+                print("%5d %-6s %d %d" % (ind, "route", layers[0], layers[1]))
+                prev_width = out_widths[layers[0]]
+                prev_height = out_heights[layers[0]]
+                assert prev_width == out_widths[layers[1]]
+                assert prev_height == out_heights[layers[1]]
+                prev_filters = out_filters[layers[0]] + out_filters[layers[1]]
+            out_widths.append(prev_width)
+            out_heights.append(prev_height)
+            out_filters.append(prev_filters)
+        elif block["type"] in ["region", "yolo"]:
+            print("%5d %-6s" % (ind, "detection"))
+            out_widths.append(prev_width)
+            out_heights.append(prev_height)
+            out_filters.append(prev_filters)
+        elif block["type"] == "shortcut":
+            from_id = int(block["from"])
+            from_id = from_id if from_id > 0 else from_id + ind
+            print("%5d %-6s %d" % (ind, "shortcut", from_id))
+            prev_width = out_widths[from_id]
+            prev_height = out_heights[from_id]
+            prev_filters = out_filters[from_id]
+            out_widths.append(prev_width)
+            out_heights.append(prev_height)
+            out_filters.append(prev_filters)
+        else:
+            print("unknown type %s" % (block["type"]))
+
+
+def load_conv(buf, start, conv_model):
+    num_w = conv_model.weight.numel()
+    num_b = conv_model.bias.numel()
+    conv_model.bias.data.copy_(torch.from_numpy(buf[start : start + num_b]))
+    start = start + num_b
+    conv_model.weight.data.copy_(
+        torch.from_numpy(buf[start : start + num_w]).view_as(conv_model.weight.data)
+    )
+    start = start + num_w
+    return start
+
+
+def load_conv_bn(buf, start, conv_model, bn_model):
+    num_w = conv_model.weight.numel()
+    num_b = bn_model.bias.numel()
+    bn_model.bias.data.copy_(torch.from_numpy(buf[start : start + num_b]))
+    start = start + num_b
+    bn_model.weight.data.copy_(torch.from_numpy(buf[start : start + num_b]))
+    start = start + num_b
+    bn_model.running_mean.copy_(torch.from_numpy(buf[start : start + num_b]))
+    start = start + num_b
+    bn_model.running_var.copy_(torch.from_numpy(buf[start : start + num_b]))
+    start = start + num_b
+    conv_model.weight.data.copy_(
+        torch.from_numpy(buf[start : start + num_w]).view_as(conv_model.weight.data)
+    )
+    start = start + num_w
+    return start
