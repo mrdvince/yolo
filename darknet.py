@@ -65,3 +65,44 @@ class EmptyModule(nn.Module):
 
     def forward(self, x):
         return x
+
+def parse_config(cfgfile):
+    blocks = []
+    fp = open(cfgfile, "r")
+    block = None
+    line = fp.readline()
+    while line != "":
+        line = line.rstrip()
+        if line == "" or line[0] == "#":
+            line = fp.readline()
+            continue
+        elif line[0] == "[":
+            if block:
+                blocks.append(block)
+            block = dict()
+            block["type"] = line.lstrip("[").rstrip("]")
+            # set default value
+            if block["type"] == "convolutional":
+                block["batch_normalize"] = 0
+        else:
+            key, value = line.split("=")
+            key = key.strip()
+            if key == "type":
+                key = "_type"
+            value = value.strip()
+            block[key] = value
+        line = fp.readline()
+    if block:
+        blocks.append(block)
+    fp.close()
+    return blocks
+
+
+def convert2cpu(gpu_matrix):
+    return torch.FloatTensor(gpu_matrix.size()).copy_(gpu_matrix)
+
+
+def convert2cpu_long(gpu_matrix):
+    return torch.LongTensor(gpu_matrix.size()).copy_(gpu_matrix)
+
+
