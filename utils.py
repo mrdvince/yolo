@@ -79,7 +79,7 @@ def detect_objects(model, img, iou_thresh, nms_thresh):
     start = time.time()
     model.eval()
     # image shape 1x3x416x416
-    img = torch.from_numpy(img.transpose(2, 0, 1)).float().div(255.0).unsqueeze()
+    img = torch.from_numpy(img.transpose(2, 0, 1)).float().div(255.0).unsqueeze(dim=0)
     list_boxes = model(img, nms_thresh)
     # new list with all the boxes returned by the network
     boxes = list_boxes[0][0] + list_boxes[1][0] + list_boxes[2][0]
@@ -124,12 +124,13 @@ def print_objects(boxes, class_names):
 
 
 def plot_boxes(img, boxes, class_names, plot_labels, color=None):
+
     # Define a tensor used to set the colors of the bounding boxes
     colors = torch.FloatTensor(
         [[1, 0, 1], [0, 0, 1], [0, 1, 1], [0, 1, 0], [1, 1, 0], [1, 0, 0]]
     )
 
-    # set colors of the bounding boxes
+    # Define a function to set the colors of the bounding boxes
     def get_color(c, x, max_val):
         ratio = float(x) / max_val * 5
         i = int(np.floor(ratio))
@@ -137,28 +138,34 @@ def plot_boxes(img, boxes, class_names, plot_labels, color=None):
 
         ratio = ratio - i
         r = (1 - ratio) * colors[i][c] + ratio * colors[j][c]
+
         return int(r * 255)
 
-    # width and height of the image
+    # Get the width and height of the image
     width = img.shape[1]
     height = img.shape[0]
 
-    # figure and plot the image
+    # Create a figure and plot the image
     fig, a = plt.subplots(1, 1)
     a.imshow(img)
 
-    # plot the bounding boxes and corresponding labels
+    # Plot the bounding boxes and corresponding labels on top of the image
     for i in range(len(boxes)):
+
+        # Get the ith bounding box
         box = boxes[i]
+
         # Get the (x,y) pixel coordinates of the lower-left and lower-right corners
         # of the bounding box relative to the size of the image.
         x1 = int(np.around((box[0] - box[2] / 2.0) * width))
         y1 = int(np.around((box[1] - box[3] / 2.0) * height))
         x2 = int(np.around((box[0] + box[2] / 2.0) * width))
         y2 = int(np.around((box[1] + box[3] / 2.0) * height))
-        # rgb value -> red
+
+        # Set the default rgb value to red
         rgb = (1, 0, 0)
 
+        # Use the same color to plot the bounding boxes of the same object class
         if len(box) >= 7 and class_names:
             cls_conf = box[5]
             cls_id = box[6]
@@ -168,40 +175,43 @@ def plot_boxes(img, boxes, class_names, plot_labels, color=None):
             green = get_color(1, offset, classes) / 255
             blue = get_color(0, offset, classes) / 255
 
-            # if color
+            # If a color is given then set rgb to the given color instead
             if color is None:
                 rgb = (red, green, blue)
             else:
                 rgb = color
 
-        # width and height of the bounding box relative to size of image
+        # Calculate the width and height of the bounding box relative to the size of the image.
         width_x = x2 - x1
         width_y = y1 - y2
+
         # Set the postion and size of the bounding box. (x1, y2) is the pixel coordinate of the
         # lower-left corner of the bounding box relative to the size of the image.
         rect = patches.Rectangle(
             (x1, y2), width_x, width_y, linewidth=2, edgecolor=rgb, facecolor="none"
         )
 
-        # draw the bounding box on the image
+        # Draw the bounding box on top of the image
         a.add_patch(rect)
 
-        # if plot labels
+        # If plot_labels = True then plot the corresponding label
         if plot_labels:
-            # string with object class name and corresponding object class probability
-            conf_txt = class_names[cls_id] + ": {:.1f}".format(cls_conf)
-            # x and y offsets for the labels
+
+            # Create a string with the object class name and the corresponding object class probability
+            conf_tx = class_names[cls_id] + ": {:.1f}".format(cls_conf)
+
+            # Define x and y offsets for the labels
             lxc = (img.shape[1] * 0.266) / 100
             lyc = (img.shape[0] * 1.180) / 100
 
-            # draw the labels on top of the image
+            # Draw the labels on top of the image
             a.text(
                 x1 + lxc,
                 y1 - lyc,
-                conf_txt,
+                conf_tx,
                 fontsize=24,
                 color="k",
                 bbox=dict(facecolor=rgb, edgecolor=rgb, alpha=0.8),
             )
 
-        plt.show()
+    plt.show()
